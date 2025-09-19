@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}仕入れ履歴{% endblock %}
+{% block content %}
+<h2>仕入れ履歴（最新200件）</h2>
+
+<div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>日時</th><th>商品</th><th>仕入先</th>
+        <th>数量</th><th>単価</th><th>金額</th><th>備考</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.purchased_at }}</td>
+        <td>{{ r.item }}</td>
+        <td>{{ r.supplier }}</td>
+        <td>{{ r.qty }}</td>
+        <td>{{ r.unit_price }}</td>
+        <td>{{ "%.2f"|format(r.amount) }}</td>
+        <td>{{ r.note }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
