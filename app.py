@@ -253,7 +253,7 @@ def purchase():
     return redirect(url_for("index"))
 
 # 任意：履歴画面（既存テンプレがあれば表示）
-@app.get("/purchases")
+@app.get("/purchases", endpoint="purchases_list")  # ★ エイリアス名をテンプレに合わせる
 @login_required
 def purchases_page():
     try:
