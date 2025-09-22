@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}管理者ユーザー作成{% endblock %}
+{% block content %}
+<h2>管理者ユーザーを作成</h2>
+<form action="{{ url_for('register_post') }}" method="post" class="card" style="max-width:420px">
+  <label>名前
+    <input type="text" name="name" required>
+  </label>
+  <label>メール
+    <input type="email" name="email" required>
+  </label>
+  <label>パスワード
+    <input type="password" name="password" required>
+  </label>
+  <button type="submit">作成</button>
+</form>
+{% endblock %}

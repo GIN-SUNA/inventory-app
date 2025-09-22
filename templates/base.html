@@ -10,9 +10,17 @@
   <header class="site-header">
     <h1 class="site-title"><a href="{{ url_for('index') }}">喫茶店 在庫管理</a></h1>
     <nav class="site-nav">
-      <a href="{{ url_for('index') }}">在庫一覧</a>
-      <a href="{{ url_for('tx_list') }}">入出庫履歴</a>
-      <a href="{{ url_for('purchases_list') }}">仕入れ履歴</a>
+      {% if current_user.is_authenticated %}
+        <span class="muted">{{ current_user.name }} さん</span>
+        <a href="{{ url_for('index') }}">在庫一覧</a>
+        <a href="{{ url_for('tx_list') }}">入出庫履歴</a>
+        <a href="{{ url_for('purchases_list') }}">仕入れ履歴</a>
+        <form action="{{ url_for('logout') }}" method="post" style="display:inline">
+          <button>ログアウト</button>
+        </form>
+      {% else %}
+        <a href="{{ url_for('login') }}">ログイン</a>
+      {% endif %}
     </nav>
   </header>
 
@@ -26,7 +34,6 @@
         </ul>
       {% endif %}
     {% endwith %}
-
     {% block content %}{% endblock %}
   </main>
 </body>
