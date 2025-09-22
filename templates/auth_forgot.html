@@ -1,0 +1,9 @@
+<!-- templates/auth_forgot.html -->
+{% extends "base.html" %}
+{% block content %}
+<h2>パスワード再設定</h2>
+<form method="post" action="{{ url_for('pw.forgot_post') }}">
+  <input name="email" type="email" placeholder="you@example.com" required>
+  <button type="submit">送信</button>
+</form>
+{% endblock %}

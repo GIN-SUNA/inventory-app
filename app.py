@@ -261,12 +261,14 @@ def purchases_page():
     except Exception:
         return render_template(choose_template(["index.html"]))
 
-@app.get("/transactions")
+@app.get("/transactions", endpoint="tx_list")  # ← ここを endpoint="tx_list" に
 @login_required
 def transactions_page():
+    candidates = ["transactions.html", "transactions/index.html"]
     try:
-        return render_template(choose_template(["transactions.html","transactions/index.html"]))
+        return render_template(choose_template(candidates))
     except Exception:
+        flash("取引一覧テンプレートが見つからなかったため、ダッシュボードに戻りました。", "warning")
         return render_template(choose_template(["index.html"]))
 
 # ==============================

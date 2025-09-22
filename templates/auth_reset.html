@@ -1,0 +1,11 @@
+<!-- templates/auth_reset.html -->
+{% extends "base.html" %}
+{% block content %}
+<h2>新しいパスワード</h2>
+<form method="post" action="{{ url_for('pw.reset_submit') }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <input name="password" type="password" placeholder="新しいパスワード" required>
+  <input name="confirm"  type="password" placeholder="確認用" required>
+  <button type="submit">更新</button>
+</form>
+{% endblock %}
