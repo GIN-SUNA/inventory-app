@@ -1,359 +1,276 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session
-from dotenv import load_dotenv
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
 import os
+from datetime import timedelta, datetime
+from dotenv import load_dotenv
 
-# .env 読み込み
+from flask import (
+    Flask, render_template, request, redirect, url_for, flash, current_app, abort
+)
+from flask_login import (
+    LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+)
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import generate_password_hash, check_password_hash
+
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Boolean, DateTime, func, select, Index
+)
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
+
+# ==============================
+# 設定
+# ==============================
 load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///instance/app.sqlite")
+FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
+DATABASE_URL     = os.getenv("DATABASE_URL", "sqlite:///instance/app.sqlite")
+# メール確認を将来ONにしたい場合は .env で true に（今は既定 false）
+REQUIRE_EMAIL_VERIFY = os.getenv("REQUIRE_EMAIL_VERIFY", "false").lower() == "true"
 
-# Flask-Login 用の軽量ユーザークラス
-class User(UserMixin):
-    def __init__(self, id: int, email: str, name: str, role: str):
-        self.id = id
-        self.email = email
-        self.name = name
-        self.role = role
+# ==============================
+# アプリ
+# ==============================
+app = Flask(__name__, template_folder="templates", static_folder="static")
+app.secret_key = FLASK_SECRET_KEY
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+app.config.update(
+    SESSION_COOKIE_SECURE=False if app.debug else True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    REMEMBER_COOKIE_DURATION=timedelta(days=14),
+)
 
-def create_app():
-    app = Flask(__name__, instance_relative_config=True)
-    app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dev")
-    app.config["DATABASE_URL"] = DATABASE_URL
+# ==============================
+# DB
+# ==============================
+if DATABASE_URL.startswith("sqlite"):
+    os.makedirs("instance", exist_ok=True)
 
-    # DB 準備
-    os.makedirs(app.instance_path, exist_ok=True)
-    engine = create_engine(app.config["DATABASE_URL"], future=True)
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+    future=True,
+    echo=False,
+)
+SessionLocal = scoped_session(sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True))
+Base = declarative_base()
 
-    with engine.begin() as conn:
-        # 認証テーブル
-        conn.exec_driver_sql("""
-        CREATE TABLE IF NOT EXISTS users(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          email TEXT UNIQUE NOT NULL,
-          name TEXT NOT NULL,
-          password_hash TEXT NOT NULL,
-          role TEXT NOT NULL DEFAULT 'staff'
-        );
-        """)
-        # 仕入先
-        conn.exec_driver_sql("""
-        CREATE TABLE IF NOT EXISTS suppliers(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT UNIQUE NOT NULL
-        );
-        """)
-        # 品目
-        conn.exec_driver_sql("""
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            unit TEXT NOT NULL DEFAULT '個',
-            min_qty REAL NOT NULL DEFAULT 0,
-            supplier_id INTEGER,
-            FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
-        );
-        """)
-        # 在庫
-        conn.exec_driver_sql("""
-        CREATE TABLE IF NOT EXISTS stock_levels (
-            item_id INTEGER PRIMARY KEY,
-            current_qty REAL NOT NULL DEFAULT 0,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (item_id) REFERENCES items(id)
-        );
-        """)
-        # 入出庫（任意）
-        conn.exec_driver_sql("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT DEFAULT CURRENT_TIMESTAMP,
-            type TEXT NOT NULL CHECK (type IN ('IN','OUT','ADJ')),
-            item_id INTEGER NOT NULL,
-            qty REAL NOT NULL,
-            note TEXT,
-            user TEXT,
-            FOREIGN KEY (item_id) REFERENCES items(id)
-        );
-        """)
-        # 仕入れ
-        conn.exec_driver_sql("""
-        CREATE TABLE IF NOT EXISTS purchases(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          purchased_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          item_id INTEGER NOT NULL,
-          supplier_id INTEGER,
-          qty REAL NOT NULL,
-          unit_price REAL NOT NULL,
-          note TEXT,
-          FOREIGN KEY (item_id) REFERENCES items(id),
-          FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
-        );
-        """)
+class User(UserMixin, Base):
+    __tablename__ = "users"
+    id            = Column(Integer, primary_key=True)
+    name          = Column(String(120), nullable=False)
+    email         = Column(String(255), nullable=False, unique=True)
+    password_hash = Column(String(255), nullable=False)
+    role          = Column(String(20),  nullable=False, default="staff")   # admin / staff
+    is_active     = Column(Boolean,     nullable=False, default=True)
+    email_verified= Column(Boolean,     nullable=False, default=False)
+    created_at    = Column(DateTime, server_default=func.now())
 
-        # 初回だけ管理者を自動作成（ENV が設定されていて、ユーザーがまだ居ない場合）
-        admin_email = os.getenv("ADMIN_EMAIL")
-        admin_pass = os.getenv("ADMIN_PASSWORD")
-        admin_name = os.getenv("ADMIN_NAME", "Admin")
-        if admin_email and admin_pass:
-            count = conn.exec_driver_sql("SELECT COUNT(*) FROM users").fetchone()[0]
-            if count == 0:
-                conn.exec_driver_sql("""
-                  INSERT INTO users(email, name, password_hash, role)
-                  VALUES(:e, :n, :ph, 'owner')
-                """, {"e": admin_email, "n": admin_name,
-                      "ph": generate_password_hash(admin_pass)})
+    def get_id(self): return str(self.id)
+    def set_password(self, raw): self.password_hash = generate_password_hash(raw)
+    def check_password(self, raw): return check_password_hash(self.password_hash, raw)
 
-    # Flask-Login セットアップ
-    login_manager = LoginManager()
-    login_manager.login_view = "login"   # 未ログイン時は /login に飛ばす
-    login_manager.init_app(app)
+Index("idx_users_email_unique", User.email, unique=True)
+Base.metadata.create_all(engine)
 
-    @login_manager.user_loader
-    def load_user(user_id: str):
-        with Session(engine) as s:
-            row = s.execute(text("SELECT id, email, name, role FROM users WHERE id = :id"),
-                            {"id": int(user_id)}).fetchone()
-            if not row:
-                return None
-            return User(row.id, row.email, row.name, row.role)
+# ==============================
+# Login 管理
+# ==============================
+login_manager = LoginManager()
+login_manager.login_view = "login"
+login_manager.init_app(app)
 
-    # ===== 認証 ルート =====
-    @app.get("/login")
-    def login():
-        if current_user.is_authenticated:
-            return redirect(url_for("index"))
-        return render_template("auth_login.html")
+@login_manager.user_loader
+def load_user(user_id: str):
+    with SessionLocal() as s:
+        return s.get(User, int(user_id))
 
-    @app.post("/login")
-    def login_post():
-        email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
-        with Session(engine) as s:
-            row = s.execute(text("SELECT id, email, name, role, password_hash FROM users WHERE lower(email)=:e"),
-                            {"e": email}).fetchone()
-        if not row or not check_password_hash(row.password_hash, password):
-            flash("メールまたはパスワードが違います", "error")
-            return redirect(url_for("login"))
-        user = User(row.id, row.email, row.name, row.role)
-        login_user(user, remember=True)
-        flash("ログインしました", "success")
-        return redirect(url_for("index"))
+app.session_maker = SessionLocal
+app.User = User
 
-    @app.post("/logout")
-    @login_required
-    def logout():
+# ==============================
+# ユーティリティ（テンプレ/フォーム差異を吸収）
+# ==============================
+def choose_template(candidates):
+    """候補の中から実在するテンプレートを返す。なければ最初（エラー防止のため存在しなければ abort 404）。"""
+    for name in candidates:
+        path = os.path.join(app.template_folder or "templates", name)
+        if os.path.exists(path):
+            return name
+    # どれも無ければ 404 にする（テンプレは維持方針なので無理に作らない）
+    abort(404, f"テンプレートが見つかりません: {candidates}")
+
+def first_value(form, *keys, default=""):
+    """フォームから最初に見つかったキーの値を返す（名前の差異を吸収）。"""
+    for k in keys:
+        if k in form:
+            v = form.get(k, "")
+            if isinstance(v, str): v = v.strip()
+            return v
+    return default
+
+# ==============================
+# 役割チェック
+# ==============================
+from functools import wraps
+def roles_required(*roles):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not current_user.is_authenticated:
+                return login_manager.unauthorized()
+            if current_user.role not in roles:
+                flash("権限がありません。", "error")
+                return redirect(url_for("index"))
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+# ==============================
+# 初期管理者の自動作成（環境変数）
+# ==============================
+def ensure_admin():
+    admin_email = os.getenv("ADMIN_EMAIL")
+    admin_pass  = os.getenv("ADMIN_PASSWORD")
+    admin_name  = os.getenv("ADMIN_NAME", "Admin")
+    if not admin_email or not admin_pass:
+        return
+    with SessionLocal() as s:
+        existing = s.execute(select(User).where(User.email == admin_email.lower())).scalar_one_or_none()
+        if existing: return
+        u = User(name=admin_name, email=admin_email.lower(), role="admin",
+                 is_active=True, email_verified=True)
+        u.set_password(admin_pass)
+        s.add(u); s.commit()
+ensure_admin()
+
+# ==============================
+# ページ
+# ==============================
+@app.get("/")
+def index():
+    # 既存 index.html をそのまま使う想定
+    return render_template(choose_template(["index.html"]))
+
+# --- ログイン（GET）: 既存テンプレを使う ---
+@app.get("/login")
+@app.get("/signin")
+@app.get("/users/login")
+def login():
+    tpl = choose_template(["auth_login.html","login.html","signin.html"])
+    return render_template(tpl)
+
+# --- ログイン（POST）: フォーム名の違いを吸収 ---
+@app.post("/login")
+@app.post("/signin")
+@app.post("/users/login")
+def login_post():
+    form = request.form
+    email = first_value(form, "email","mail","username","user","login","login_id").lower()
+    password = first_value(form, "password","pass","pwd")
+
+    remember = bool(first_value(form, "remember","remember_me","keep","keep_me","stay","stay_signed_in","1"))
+    with SessionLocal() as s:
+        u = s.execute(select(User).where(User.email == email)).scalar_one_or_none()
+        if not u or not u.is_active or not u.check_password(password):
+            flash("メールまたはパスワードが正しくないか、アカウントが無効です。", "error")
+            return redirect(request.path)  # 呼ばれたURLに戻す
+
+        if REQUIRE_EMAIL_VERIFY and not u.email_verified:
+            flash("メール確認が未完了のためログインできません。メールのリンクをご確認ください。", "warning")
+            return redirect(request.path)
+
+        login_user(u, remember=remember)
+        next_url = request.args.get("next") or url_for("index")
+        return redirect(next_url)
+
+# --- ログアウト ---
+@app.post("/logout")
+@app.post("/signout")
+def logout():
+    if current_user.is_authenticated:
         logout_user()
-        flash("ログアウトしました", "success")
-        return redirect(url_for("login"))
+    flash("ログアウトしました。", "info")
+    # ログアウト後にログイン画面へ（どのテンプレでもOK）
+    return redirect(url_for("login"))
 
-    # （任意）初回だけ有効にしてユーザー作成したい場合に利用
-    @app.get("/register")
-    def register():
-        # すでにユーザーがいれば登録は閉じる（安全のため）
-        with Session(engine) as s:
-            cnt = s.execute(text("SELECT COUNT(*) FROM users")).scalar_one()
-        if cnt > 0:
-            flash("登録は無効です。管理者に依頼してください。", "error")
+# --- 新規登録（GET）: 既存テンプレをそのまま ---
+@app.get("/register")
+@app.get("/signup")
+@app.get("/users/new")
+def register():
+    tpl = choose_template(["auth_register.html","register.html","signup.html","users/new.html"])
+    return render_template(tpl)
+
+# --- 新規登録（POST）: 既存フォーム名に合わせて吸収 ---
+@app.post("/register")
+@app.post("/signup")
+@app.post("/users/new")
+def register_post():
+    form = request.form
+    name  = first_value(form, "name","fullname","full_name","user_name","display_name")
+    email = first_value(form, "email","mail","username","user","login").lower()
+    password = first_value(form, "password","pass","pwd")
+
+    if not name or not email or not password:
+        flash("必須項目が未入力です。", "error")
+        return redirect(request.path)
+
+    with SessionLocal() as s:
+        U = User
+        exists = s.execute(select(U).where(U.email == email)).scalar_one_or_none()
+        if exists:
+            flash("このメールアドレスは既に登録済みです。ログインしてください。", "info")
             return redirect(url_for("login"))
-        return render_template("auth_register.html")
 
-    @app.post("/register")
-    def register_post():
-        with Session(engine) as s:
-            cnt = s.execute(text("SELECT COUNT(*) FROM users")).scalar_one()
-            if cnt > 0:
-                flash("登録は無効です。管理者に依頼してください。", "error")
-                return redirect(url_for("login"))
-        name = request.form.get("name","").strip()
-        email = request.form.get("email","").strip().lower()
-        password = request.form.get("password","")
-        if not name or not email or not password:
-            flash("すべて入力してください", "error")
-            return redirect(url_for("register"))
-        with Session(engine) as s:
-            try:
-                s.execute(text("""
-                  INSERT INTO users(email, name, password_hash, role)
-                  VALUES(:e,:n,:ph,'owner')
-                """), {"e": email, "n": name, "ph": generate_password_hash(password)})
-                s.commit()
-                flash("ユーザーを作成しました。ログインしてください。", "success")
-                return redirect(url_for("login"))
-            except Exception as e:
-                s.rollback()
-                flash(f"登録に失敗: {e}", "error")
-                return redirect(url_for("register"))
+        u = U(name=name, email=email, role="staff", is_active=True,
+              email_verified=(not REQUIRE_EMAIL_VERIFY))
+        u.set_password(password)
+        s.add(u); s.commit()
 
-    # ===== 在庫アプリ ルート =====
-    @app.get("/")
-    @login_required
-    def index():
-        with Session(engine) as s:
-            items = s.execute(text("""
-              SELECT i.id, i.name, i.unit, i.min_qty,
-                     COALESCE(sl.current_qty, 0) AS qty,
-                     COALESCE(s.name, '') AS supplier
-              FROM items i
-              LEFT JOIN stock_levels sl ON sl.item_id = i.id
-              LEFT JOIN suppliers s ON s.id = i.supplier_id
-              ORDER BY i.name
-            """)).all()
-            suppliers = s.execute(text("SELECT id, name FROM suppliers ORDER BY name")).all()
-        low = [row for row in items if row.qty <= row.min_qty]
-        return render_template("index.html", items=items, suppliers=suppliers, low=low)
+    if REQUIRE_EMAIL_VERIFY:
+        # （将来ONにした時のためのフック：確認メール送信。今はOFF既定）
+        try:
+            from reset_pass import send_verification_email
+            send_verification_email(email, name)
+            flash("仮登録しました。確認メールを送信しました。リンクを踏んで登録を完了してください。", "success")
+        except Exception:
+            # メール未設定でも止まらない
+            flash("仮登録しました。メール確認が必要です。", "success")
+    else:
+        flash("登録が完了しました。ログインしてください。", "success")
 
-    @app.post("/suppliers")
-    @login_required
-    def add_supplier():
-        name = request.form.get("supplier_name","").strip()
-        if not name:
-            flash("仕入先名を入力してください","error"); return redirect(url_for("index"))
-        with Session(engine) as s:
-            try:
-                s.execute(text("INSERT INTO suppliers(name) VALUES(:n)"), {"n":name})
-                s.commit(); flash(f"仕入先「{name}」を追加しました","success")
-            except Exception as e:
-                s.rollback(); flash(f"追加失敗: {e}","error")
-        return redirect(url_for("index"))
+    return redirect(url_for("login"))
 
-    @app.post("/items")
-    @login_required
-    def add_item():
-        name = request.form.get("name","").strip()
-        unit = request.form.get("unit","個").strip()
-        min_qty = float(request.form.get("min_qty",0) or 0)
-        supplier_id = request.form.get("supplier_id") or None
-        if not name:
-            flash("品目名を入力してください", "error")
-            return redirect(url_for("index"))
-        with Session(engine) as s:
-            try:
-                s.execute(text("""
-                  INSERT INTO items(name, unit, min_qty, supplier_id)
-                  VALUES(:n,:u,:m,:sid)
-                """), {"n":name,"u":unit,"m":min_qty,"sid":supplier_id})
-                s.execute(text("""
-                  INSERT OR IGNORE INTO stock_levels(item_id, current_qty)
-                  SELECT id, 0 FROM items WHERE name=:n
-                """), {"n":name})
-                s.commit(); flash(f"品目「{name}」を追加しました","success")
-            except Exception as e:
-                s.rollback(); flash(f"追加に失敗: {e}","error")
-        return redirect(url_for("index"))
+# --- パスワードリセット系（テンプレ維持、ルートは複数エイリアス） ---
+from reset_pass import register_reset_routes
+register_reset_routes(app, SessionLocal, User)
 
-    @app.post("/bump")
-    @login_required
-    def bump():
-        item_id = int(request.form["item_id"])
-        delta = float(request.form["delta"])
-        with Session(engine) as s:
-            try:
-                s.execute(text("""
-                  INSERT INTO stock_levels(item_id,current_qty)
-                  VALUES(:i,:q)
-                  ON CONFLICT(item_id) DO UPDATE SET
-                    current_qty = stock_levels.current_qty + :q,
-                    updated_at = CURRENT_TIMESTAMP
-                """), {"i":item_id,"q":delta})
-                s.commit()
-            except Exception as e:
-                s.rollback(); flash(f"在庫更新に失敗: {e}","error")
-        return redirect(url_for("index"))
+# --- 仕入れフォーム（既存 index 側からの action を想定） ---
+@app.post("/purchase")
+@login_required
+def purchase():
+    # ここはダミー。既存フォームの name を変えずに受け取れるよう最低限で受理。
+    flash("仕入れを受け付けました。（ダミー：後でDB保存を実装）", "info")
+    return redirect(url_for("index"))
 
-    @app.post("/purchase")
-    @login_required
-    def purchase():
-        item_id = int(request.form["p_item_id"])
-        supplier_id = request.form.get("p_supplier_id") or None
-        qty = float(request.form["p_qty"])
-        unit_price = float(request.form["p_unit_price"])
-        purchased_at = request.form.get("p_date") or None
-        note = request.form.get("p_note")
-        with Session(engine) as s:
-            try:
-                s.execute(text("""
-                  INSERT INTO purchases(purchased_at,item_id,supplier_id,qty,unit_price,note)
-                  VALUES(COALESCE(:dt,CURRENT_TIMESTAMP),:i,:sid,:q,:up,:note)
-                """), {"dt":purchased_at,"i":item_id,"sid":supplier_id,"q":qty,"up":unit_price,"note":note})
-                s.execute(text("""
-                  INSERT INTO stock_levels(item_id,current_qty)
-                  VALUES(:i,:q)
-                  ON CONFLICT(item_id) DO UPDATE SET
-                    current_qty = stock_levels.current_qty + :q,
-                    updated_at = CURRENT_TIMESTAMP
-                """), {"i":item_id,"q":qty})
-                s.commit(); flash("仕入れを登録し在庫を更新しました","success")
-            except Exception as e:
-                s.rollback(); flash(f"登録失敗: {e}","error")
-        return redirect(url_for("index"))
+# 任意：履歴画面（既存テンプレがあれば表示）
+@app.get("/purchases")
+@login_required
+def purchases_page():
+    try:
+        return render_template(choose_template(["purchases.html","purchases/index.html"]))
+    except Exception:
+        return render_template(choose_template(["index.html"]))
 
-    @app.post("/tx")
-    @login_required
-    def add_tx():
-        item_id = int(request.form["item_id"])
-        tx_type = request.form["type"]  # IN/OUT/ADJ
-        qty = float(request.form["qty"])
-        note = request.form.get("note")
-        user = request.form.get("user", current_user.name if current_user.is_authenticated else "staff")
-        delta = qty if tx_type == "IN" else (-qty if tx_type == "OUT" else 0)
-        with Session(engine) as s:
-            try:
-                s.execute(text("""
-                    INSERT INTO transactions(type, item_id, qty, note, user)
-                    VALUES(:t,:i,:q,:n,:u)
-                """), {"t":tx_type,"i":item_id,"q":qty,"n":note,"u":user})
-                s.execute(text("""
-                    INSERT INTO stock_levels(item_id,current_qty)
-                    VALUES(:i,:q)
-                    ON CONFLICT(item_id) DO UPDATE SET
-                      current_qty = stock_levels.current_qty + :d,
-                      updated_at = CURRENT_TIMESTAMP
-                """), {"i":item_id,"q":qty if tx_type=="ADJ" else delta, "d":0 if tx_type=="ADJ" else delta})
-                if tx_type == "ADJ":
-                    s.execute(text("""
-                        UPDATE stock_levels SET current_qty=:q, updated_at=CURRENT_TIMESTAMP
-                        WHERE item_id=:i
-                    """), {"i":item_id,"q":qty})
-                s.commit()
-                op = {"IN":"入庫","OUT":"出庫","ADJ":"調整"}[tx_type]
-                flash(f"{op}を登録しました","success")
-            except Exception as e:
-                s.rollback(); flash(f"登録に失敗: {e}","error")
-        return redirect(url_for("index"))
+@app.get("/transactions")
+@login_required
+def transactions_page():
+    try:
+        return render_template(choose_template(["transactions.html","transactions/index.html"]))
+    except Exception:
+        return render_template(choose_template(["index.html"]))
 
-    @app.get("/transactions")
-    @login_required
-    def tx_list():
-        with Session(engine) as s:
-            data = s.execute(text("""
-                SELECT t.id, t.ts, t.type, i.name, t.qty, t.note, t.user
-                FROM transactions t
-                JOIN items i ON i.id = t.item_id
-                ORDER BY t.ts DESC
-                LIMIT 200
-            """)).all()
-        return render_template("transactions.html", rows=data)
-
-    @app.get("/purchases")
-    @login_required
-    def purchases_list():
-        with Session(engine) as s:
-            rows = s.execute(text("""
-              SELECT p.id, p.purchased_at, i.name AS item, COALESCE(s.name,'') AS supplier,
-                     p.qty, p.unit_price, (p.qty*p.unit_price) AS amount, p.note
-              FROM purchases p
-              JOIN items i ON i.id=p.item_id
-              LEFT JOIN suppliers s ON s.id=p.supplier_id
-              ORDER BY p.purchased_at DESC
-              LIMIT 200
-            """)).all()
-        return render_template("purchases.html", rows=rows)
-
-    return app
-
+# ==============================
+# エントリポイント
+# ==============================
 if __name__ == "__main__":
-    app = create_app()
     app.run(debug=True)
