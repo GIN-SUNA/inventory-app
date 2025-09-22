@@ -244,13 +244,18 @@ def register_post():
 from reset_pass import register_reset_routes
 register_reset_routes(app, SessionLocal, User)
 
-# --- 仕入れフォーム（既存 index 側からの action を想定） ---
-@app.post("/purchase")
+# --- 仕入れ登録：両対応にする ---
+@app.post("/purchase", endpoint="purchase")   # ← 旧テンプレ互換（url_for('purchase')）
 @login_required
 def purchase():
-    # ここはダミー。既存フォームの name を変えずに受け取れるよう最低限で受理。
     flash("仕入れを受け付けました。（ダミー：後でDB保存を実装）", "info")
-    return redirect(url_for("index"))
+    return redirect(url_for("index"))  # or url_for("tx_list")
+
+@app.post("/add-tx", endpoint="add_tx")       # ← 新テンプレ互換（url_for('add_tx')）
+@login_required
+def add_tx_alias():
+    return purchase()  # 共通処理に集約
+
 
 # 任意：履歴画面（既存テンプレがあれば表示）
 @app.get("/purchases", endpoint="purchases_list")  # ★ エイリアス名をテンプレに合わせる
