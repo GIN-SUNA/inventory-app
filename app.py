@@ -256,6 +256,28 @@ def purchase():
 def add_tx_alias():
     return purchase()  # 共通処理に集約
 
+# --- 仕入先追加：テンプレの url_for('add_supplier') に合わせる ---
+@app.route("/add-supplier", methods=["POST"], endpoint="add_supplier")
+@login_required
+def add_supplier():
+    # 必要に応じてフォーム名の差異を吸収
+    name    = first_value(request.form, "supplier_name", "name")
+    contact = first_value(request.form, "contact")
+    email   = first_value(request.form, "email")
+    # いまはダミー：保存は後で実装
+    flash("仕入先を受け付けました。（ダミー：後でDB保存を実装）", "success")
+    return redirect(url_for("index"))  # or url_for("tx_list")
+
+# --- 品目追加：テンプレの url_for('add_item') に合わせる ---
+@app.post("/add-item", endpoint="add_item")
+@login_required
+def add_item():
+    name  = first_value(request.form, "item_name", "name", "item")
+    sku   = first_value(request.form, "sku", "code")
+    note  = first_value(request.form, "note", "memo")
+    # いまはダミー：保存は後で実装
+    flash("品目を受け付けました。（ダミー：後でDB保存を実装）", "success")
+    return redirect(url_for("index"))  # or url_for("tx_list")
 
 # 任意：履歴画面（既存テンプレがあれば表示）
 @app.get("/purchases", endpoint="purchases_list")  # ★ エイリアス名をテンプレに合わせる

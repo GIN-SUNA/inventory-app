@@ -1,15 +1,29 @@
 {% extends "base.html" %}
-{% block title %}ログイン{% endblock %}
 {% block content %}
 <h2>ログイン</h2>
-<form action="{{ url_for('login_post') }}" method="post" class="card" style="max-width:420px">
-  <label>メール
-    <input type="email" name="email" required>
-  </label>
-  <label>パスワード
-    <input type="password" name="password" required>
-  </label>
-  <button type="submit">ログイン</button>
+
+<form method="post" action="{{ url_for('login_post') }}" class="card">
+  <div class="field">
+    <label for="email">メールアドレス</label>
+    <input id="email" name="email" type="email" placeholder="you@example.com" required>
+  </div>
+
+  <div class="field">
+    <label for="password">パスワード</label>
+    <input id="password" name="password" type="password" required>
+  </div>
+
+  <div class="field">
+    <label><input type="checkbox" name="remember"> ログイン状態を保持</label>
+  </div>
+
+  <div class="actions">
+    <button type="submit">ログイン</button>
+    <a href="{{ url_for('pw.forgot') }}" class="link">パスワードをお忘れですか？</a>
+  </div>
 </form>
-<p class="muted">初回のみ管理者作成が必要な場合、/register を使えます（既存ユーザーがあると無効）。</p>
+
+<p class="muted">
+  まだアカウントがありませんか？ <a href="{{ url_for('register') }}">新規登録</a>
+</p>
 {% endblock %}
