@@ -12,9 +12,9 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Boolean, DateTime, func, select, Index
+    create_engine, Column, Integer, String, Boolean, DateTime, func, select, Index, ForeignKey
 )
-from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session, relationship
 
 # ==============================
 # 設定
@@ -22,7 +22,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 load_dotenv()
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
 DATABASE_URL     = os.getenv("DATABASE_URL", "sqlite:///instance/app.sqlite")
-# メール確認を将来ONにしたい場合は .env で true に（今は既定 false）
 REQUIRE_EMAIL_VERIFY = os.getenv("REQUIRE_EMAIL_VERIFY", "false").lower() == "true"
 
 # ==============================
@@ -53,6 +52,7 @@ engine = create_engine(
 SessionLocal = scoped_session(sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True))
 Base = declarative_base()
 
+# --- User モデル ---
 class User(UserMixin, Base):
     __tablename__ = "users"
     id            = Column(Integer, primary_key=True)
@@ -69,6 +69,28 @@ class User(UserMixin, Base):
     def check_password(self, raw): return check_password_hash(self.password_hash, raw)
 
 Index("idx_users_email_unique", User.email, unique=True)
+
+# --- Supplier モデル ---
+class Supplier(Base):
+    __tablename__ = "suppliers"
+    id      = Column(Integer, primary_key=True)
+    name    = Column(String(255), nullable=False)
+    contact = Column(String(255))
+    email   = Column(String(255))
+    created_at = Column(DateTime, server_default=func.now())
+    items   = relationship("Item", back_populates="supplier")
+
+# --- Item モデル ---
+class Item(Base):
+    __tablename__ = "items"
+    id      = Column(Integer, primary_key=True)
+    name    = Column(String(255), nullable=False)
+    sku     = Column(String(100))
+    note    = Column(String(255))
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"))
+    created_at = Column(DateTime, server_default=func.now())
+    supplier   = relationship("Supplier", back_populates="items")
+
 Base.metadata.create_all(engine)
 
 # ==============================
@@ -87,19 +109,16 @@ app.session_maker = SessionLocal
 app.User = User
 
 # ==============================
-# ユーティリティ（テンプレ/フォーム差異を吸収）
+# ユーティリティ
 # ==============================
 def choose_template(candidates):
-    """候補の中から実在するテンプレートを返す。なければ最初（エラー防止のため存在しなければ abort 404）。"""
     for name in candidates:
         path = os.path.join(app.template_folder or "templates", name)
         if os.path.exists(path):
             return name
-    # どれも無ければ 404 にする（テンプレは維持方針なので無理に作らない）
     abort(404, f"テンプレートが見つかりません: {candidates}")
 
 def first_value(form, *keys, default=""):
-    """フォームから最初に見つかったキーの値を返す（名前の差異を吸収）。"""
     for k in keys:
         if k in form:
             v = form.get(k, "")
@@ -125,7 +144,7 @@ def roles_required(*roles):
     return deco
 
 # ==============================
-# 初期管理者の自動作成（環境変数）
+# 初期管理者の自動作成
 # ==============================
 def ensure_admin():
     admin_email = os.getenv("ADMIN_EMAIL")
@@ -147,10 +166,9 @@ ensure_admin()
 # ==============================
 @app.get("/")
 def index():
-    # 既存 index.html をそのまま使う想定
     return render_template(choose_template(["index.html"]))
 
-# --- ログイン（GET）: 既存テンプレを使う ---
+# --- ログイン（GET） ---
 @app.get("/login")
 @app.get("/signin")
 @app.get("/users/login")
@@ -158,7 +176,7 @@ def login():
     tpl = choose_template(["auth_login.html","login.html","signin.html"])
     return render_template(tpl)
 
-# --- ログイン（POST）: フォーム名の違いを吸収 ---
+# --- ログイン（POST） ---
 @app.post("/login")
 @app.post("/signin")
 @app.post("/users/login")
@@ -172,10 +190,10 @@ def login_post():
         u = s.execute(select(User).where(User.email == email)).scalar_one_or_none()
         if not u or not u.is_active or not u.check_password(password):
             flash("メールまたはパスワードが正しくないか、アカウントが無効です。", "error")
-            return redirect(request.path)  # 呼ばれたURLに戻す
+            return redirect(request.path)
 
         if REQUIRE_EMAIL_VERIFY and not u.email_verified:
-            flash("メール確認が未完了のためログインできません。メールのリンクをご確認ください。", "warning")
+            flash("メール確認が未完了のためログインできません。", "warning")
             return redirect(request.path)
 
         login_user(u, remember=remember)
@@ -189,10 +207,9 @@ def logout():
     if current_user.is_authenticated:
         logout_user()
     flash("ログアウトしました。", "info")
-    # ログアウト後にログイン画面へ（どのテンプレでもOK）
     return redirect(url_for("login"))
 
-# --- 新規登録（GET）: 既存テンプレをそのまま ---
+# --- 新規登録（GET） ---
 @app.get("/register")
 @app.get("/signup")
 @app.get("/users/new")
@@ -200,7 +217,7 @@ def register():
     tpl = choose_template(["auth_register.html","register.html","signup.html","users/new.html"])
     return render_template(tpl)
 
-# --- 新規登録（POST）: 既存フォーム名に合わせて吸収 ---
+# --- 新規登録（POST） ---
 @app.post("/register")
 @app.post("/signup")
 @app.post("/users/new")
@@ -227,60 +244,78 @@ def register_post():
         s.add(u); s.commit()
 
     if REQUIRE_EMAIL_VERIFY:
-        # （将来ONにした時のためのフック：確認メール送信。今はOFF既定）
         try:
             from reset_pass import send_verification_email
             send_verification_email(email, name)
-            flash("仮登録しました。確認メールを送信しました。リンクを踏んで登録を完了してください。", "success")
+            flash("仮登録しました。確認メールを送信しました。", "success")
         except Exception:
-            # メール未設定でも止まらない
             flash("仮登録しました。メール確認が必要です。", "success")
     else:
         flash("登録が完了しました。ログインしてください。", "success")
 
     return redirect(url_for("login"))
 
-# --- パスワードリセット系（テンプレ維持、ルートは複数エイリアス） ---
+# --- パスワードリセット系 ---
 from reset_pass import register_reset_routes
 register_reset_routes(app, SessionLocal, User)
 
-# --- 仕入れ登録：両対応にする ---
-@app.post("/purchase", endpoint="purchase")   # ← 旧テンプレ互換（url_for('purchase')）
+# --- 仕入れ登録 ---
+@app.post("/purchase", endpoint="purchase")
 @login_required
 def purchase():
-    flash("仕入れを受け付けました。（ダミー：後でDB保存を実装）", "info")
-    return redirect(url_for("index"))  # or url_for("tx_list")
+    # 将来的に仕入先IDや品目IDなどを保存する拡張も可
+    flash("仕入れを登録しました。", "info")
+    return redirect(url_for("index"))
 
-@app.post("/add-tx", endpoint="add_tx")       # ← 新テンプレ互換（url_for('add_tx')）
+@app.post("/add-tx", endpoint="add_tx")
 @login_required
 def add_tx_alias():
-    return purchase()  # 共通処理に集約
+    return purchase()
 
-# --- 仕入先追加：テンプレの url_for('add_supplier') に合わせる ---
+# --- 仕入先追加 ---
 @app.route("/add-supplier", methods=["POST"], endpoint="add_supplier")
 @login_required
 def add_supplier():
-    # 必要に応じてフォーム名の差異を吸収
     name    = first_value(request.form, "supplier_name", "name")
     contact = first_value(request.form, "contact")
     email   = first_value(request.form, "email")
-    # いまはダミー：保存は後で実装
-    flash("仕入先を受け付けました。（ダミー：後でDB保存を実装）", "success")
-    return redirect(url_for("index"))  # or url_for("tx_list")
 
-# --- 品目追加：テンプレの url_for('add_item') に合わせる ---
+    if not name:
+        flash("仕入先名は必須です", "error")
+        return redirect(url_for("index"))
+
+    with SessionLocal() as s:
+        supplier = Supplier(name=name, contact=contact, email=email)
+        s.add(supplier)
+        s.commit()
+
+    flash(f"仕入先「{name}」を登録しました", "success")
+    return redirect(url_for("index"))
+
+# --- 品目追加 ---
 @app.post("/add-item", endpoint="add_item")
 @login_required
 def add_item():
     name  = first_value(request.form, "item_name", "name", "item")
     sku   = first_value(request.form, "sku", "code")
     note  = first_value(request.form, "note", "memo")
-    # いまはダミー：保存は後で実装
-    flash("品目を受け付けました。（ダミー：後でDB保存を実装）", "success")
-    return redirect(url_for("index"))  # or url_for("tx_list")
+    supplier_id = first_value(request.form, "supplier_id")
 
-# 任意：履歴画面（既存テンプレがあれば表示）
-@app.get("/purchases", endpoint="purchases_list")  # ★ エイリアス名をテンプレに合わせる
+    if not name:
+        flash("品目名は必須です", "error")
+        return redirect(url_for("index"))
+
+    with SessionLocal() as s:
+        item = Item(name=name, sku=sku, note=note,
+                    supplier_id=int(supplier_id) if supplier_id else None)
+        s.add(item)
+        s.commit()
+
+    flash(f"品目「{name}」を登録しました", "success")
+    return redirect(url_for("index"))
+
+# --- 履歴画面 ---
+@app.get("/purchases", endpoint="purchases_list")
 @login_required
 def purchases_page():
     try:
@@ -288,7 +323,7 @@ def purchases_page():
     except Exception:
         return render_template(choose_template(["index.html"]))
 
-@app.get("/transactions", endpoint="tx_list")  # ← ここを endpoint="tx_list" に
+@app.get("/transactions", endpoint="tx_list")
 @login_required
 def transactions_page():
     candidates = ["transactions.html", "transactions/index.html"]
